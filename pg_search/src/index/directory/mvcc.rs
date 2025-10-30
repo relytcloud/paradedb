@@ -26,6 +26,7 @@ use crate::postgres::storage::block::{
 use crate::postgres::storage::buffer::{BufferManager, PinnedBuffer};
 use crate::postgres::storage::metadata::MetaPage;
 use crate::postgres::storage::MAX_BUFFERS_TO_EXTEND_BY;
+use crate::postgres::NeedWal;
 use parking_lot::Mutex;
 use pgrx::pg_sys;
 use std::any::Any;
@@ -67,8 +68,8 @@ pub enum MvccSatisfies {
 }
 
 impl MvccSatisfies {
-    pub fn directory(self, index_relation: &PgSearchRelation) -> MVCCDirectory {
-        MVCCDirectory::with_mvcc_style(index_relation, self)
+    pub fn directory(self, index_relation: &PgSearchRelation, need_wal: NeedWal) -> MVCCDirectory {
+        MVCCDirectory::with_mvcc_style(index_relation, self, need_wal)
     }
 }
 
@@ -84,6 +85,7 @@ pub struct MVCCDirectory {
     //
     indexrel: PgSearchRelation,
     mvcc_style: Arc<MvccSatisfies>,
+    pub need_wal: NeedWal,
 
     // keep a cache of readers behind an Arc<Mutex<_>> so that if/when this MVCCDirectory is
     // cloned, we don't lose all the work we did originally creating the FileHandler impls.  And
@@ -108,13 +110,14 @@ impl MVCCDirectory {
         index_relation: &PgSearchRelation,
         segment_ids: HashSet<SegmentId>,
     ) -> Self {
-        Self::with_mvcc_style(index_relation, MvccSatisfies::ParallelWorker(segment_ids))
+        Self::with_mvcc_style(index_relation, MvccSatisfies::ParallelWorker(segment_ids), false)
     }
 
-    pub fn with_mvcc_style(index_relation: &PgSearchRelation, mvcc_style: MvccSatisfies) -> Self {
+    pub fn with_mvcc_style(index_relation: &PgSearchRelation, mvcc_style: MvccSatisfies, need_wal: NeedWal) -> Self {
         Self {
             indexrel: Clone::clone(index_relation),
             mvcc_style: Arc::new(mvcc_style),
+            need_wal,
             readers: Default::default(),
             new_files: Default::default(),
             loaded_metas: Default::default(),
@@ -220,7 +223,7 @@ impl Directory for MVCCDirectory {
                 };
                 Ok(vacant
                     .insert(Arc::new(unsafe {
-                        SegmentComponentReader::new(&self.indexrel, file_entry)
+                        SegmentComponentReader::new(&self.indexrel, file_entry, self.need_wal)
                     }))
                     .clone())
             }
@@ -242,7 +245,7 @@ impl Directory for MVCCDirectory {
         &self,
         path: &Path,
     ) -> result::Result<Box<dyn TerminatingWrite>, OpenWriteError> {
-        let writer = unsafe { SegmentComponentWriter::new(&self.indexrel, path) };
+        let writer = unsafe { SegmentComponentWriter::new(&self.indexrel, path, true) };
         self.new_files.lock().insert(
             path.to_path_buf(),
             (writer.file_entry(), writer.total_bytes()),
@@ -287,7 +290,7 @@ impl Directory for MVCCDirectory {
     /// identified by <uuid>.<ext> PathBufs
     fn list_managed_files(&self) -> tantivy::Result<std::collections::HashSet<PathBuf>> {
         unsafe {
-            Ok(MetaPage::open(&self.indexrel)
+            Ok(MetaPage::open(&self.indexrel, false)
                 .segment_metas()
                 .list()
                 .iter()
@@ -333,10 +336,10 @@ impl Directory for MVCCDirectory {
         };
 
         // Save Schema and IndexSettings if this is the first time
-        save_schema(&self.indexrel, &meta.schema)
+        save_schema(&self.indexrel, &meta.schema, self.need_wal)
             .map_err(|err| tantivy::TantivyError::SchemaError(err.to_string()))?;
 
-        save_settings(&self.indexrel, &meta.index_settings)
+        save_settings(&self.indexrel, &meta.index_settings, self.need_wal)
             .map_err(|err| tantivy::TantivyError::InternalError(err.to_string()))?;
 
         // If there were no new segments, skip the rest of the work
@@ -345,7 +348,7 @@ impl Directory for MVCCDirectory {
         }
 
         unsafe {
-            save_new_metas(&self.indexrel, meta, previous_meta, payload)
+            save_new_metas(&self.indexrel, meta, previous_meta, payload, self.need_wal)
                 .map_err(|err| tantivy::TantivyError::InternalError(err.to_string()))?;
         }
 

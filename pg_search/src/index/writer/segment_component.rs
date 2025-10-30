@@ -4,6 +4,7 @@ use crate::postgres::storage::{LinkedBytesList, LinkedBytesListWriter};
 use pgrx::pg_sys;
 use std::io::{BufWriter, Result, Write};
 use std::path::{Path, PathBuf};
+use crate::postgres::NeedWal;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tantivy::directory::{AntiCallToken, TerminatingWrite};
@@ -12,19 +13,22 @@ use tantivy::index::SegmentComponent;
 pub struct SegmentComponentWriter {
     inner: Option<InnerSegmentComponentWriter>,
     path: PathBuf,
+    need_wal: NeedWal,
 }
 
 impl SegmentComponentWriter {
-    pub unsafe fn new(indexrel: &PgSearchRelation, path: &Path) -> Self {
+    pub unsafe fn new(indexrel: &PgSearchRelation, path: &Path, need_wal: NeedWal) -> Self {
         if path.component_type() == Some(SegmentComponent::Store) {
             Self {
                 inner: None,
                 path: path.to_path_buf(),
+                need_wal,
             }
         } else {
             Self {
-                inner: Some(InnerSegmentComponentWriter::new(indexrel)),
+                inner: Some(InnerSegmentComponentWriter::new(indexrel, need_wal)),
                 path: path.to_path_buf(),
+                need_wal,
             }
         }
     }
@@ -89,8 +93,8 @@ struct InnerSegmentComponentWriter {
 }
 
 impl InnerSegmentComponentWriter {
-    pub unsafe fn new(indexrel: &PgSearchRelation) -> Self {
-        let segment_component = LinkedBytesList::create_with_fsm(indexrel);
+    pub unsafe fn new(indexrel: &PgSearchRelation, need_wal: NeedWal) -> Self {
+        let segment_component = LinkedBytesList::create_with_fsm(indexrel, need_wal);
 
         Self {
             header_blockno: segment_component.header_blockno,

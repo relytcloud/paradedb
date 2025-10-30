@@ -24,7 +24,7 @@ use crate::postgres::storage::fsm::FreeSpaceManager;
 use crate::postgres::storage::merge::{MergeLock, VacuumList, VacuumSentinel};
 use crate::postgres::storage::{LinkedBytesList, LinkedItemList};
 use pgrx::pg_sys;
-
+use crate::postgres::NeedWal;
 /// The metadata stored on the [`Metadata`] page
 #[derive(Debug, Copy, Clone)]
 #[repr(C, packed)]
@@ -103,8 +103,8 @@ impl MetaPage {
         }
     }
 
-    pub fn open(indexrel: &PgSearchRelation) -> Self {
-        let mut bman = BufferManager::new(indexrel);
+    pub fn open(indexrel: &PgSearchRelation, need_wal: NeedWal) -> Self {
+        let mut bman = BufferManager::new(indexrel, need_wal);
         let buffer = bman.get_buffer(METAPAGE);
         let page = buffer.page();
         let metadata = page.contents::<MetaPageData>();
@@ -172,7 +172,7 @@ impl MetaPage {
     /// Acquires the merge lock.
     pub unsafe fn acquire_merge_lock(&self) -> MergeLock {
         assert!(block_number_is_valid(self.data.merge_lock));
-        MergeLock::acquire(self.bman.buffer_access().rel(), self.data.merge_lock)
+        MergeLock::acquire(self.bman.buffer_access().rel(), self.data.merge_lock,  self.bman.is_logged())
     }
 
     pub fn vacuum_list(&self) -> VacuumList {
@@ -212,6 +212,7 @@ impl MetaPage {
         Some(LinkedItemList::<SegmentMetaEntry>::open(
             self.bman.buffer_access().rel(),
             self.data.segment_meta_garbage,
+            self.bman.is_logged(),
         ))
     }
 }
@@ -265,7 +266,7 @@ impl MetaPage {
         } else {
             self.data.schema_start
         };
-        LinkedBytesList::open(self.bman.buffer_access().rel(), blockno)
+        LinkedBytesList::open(self.bman.buffer_access().rel(), blockno, self.bman.is_logged())
     }
 
     pub fn settings_bytes(&self) -> LinkedBytesList {
@@ -274,7 +275,7 @@ impl MetaPage {
         } else {
             self.data.settings_start
         };
-        LinkedBytesList::open(self.bman.buffer_access().rel(), blockno)
+        LinkedBytesList::open(self.bman.buffer_access().rel(), blockno, self.bman.is_logged())
     }
 
     pub fn segment_metas(&self) -> LinkedItemList<SegmentMetaEntry> {
@@ -283,7 +284,7 @@ impl MetaPage {
         } else {
             self.data.segment_metas_start
         };
-        LinkedItemList::<SegmentMetaEntry>::open(self.bman.buffer_access().rel(), blockno)
+        LinkedItemList::<SegmentMetaEntry>::open(self.bman.buffer_access().rel(), blockno, self.bman.is_logged())
     }
 
     // Note that this value is read when not under a share lock, so there's no guarantee that it hasn't

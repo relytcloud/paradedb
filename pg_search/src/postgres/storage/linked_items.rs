@@ -18,6 +18,7 @@
 use super::block::{BM25PageSpecialData, LinkedList, LinkedListData, MVCCEntry, PgItem};
 use super::buffer::{init_new_buffer, BufferManager, BufferMut};
 use crate::postgres::rel::PgSearchRelation;
+use crate::postgres::NeedWal;
 use anyhow::Result;
 use pgrx::pg_sys;
 use pgrx::pg_sys::BlockNumber;
@@ -84,10 +85,10 @@ impl<T: From<PgItem> + Into<PgItem> + Debug + Clone + MVCCEntry> LinkedList for 
 }
 
 impl<T: From<PgItem> + Into<PgItem> + Debug + Clone + MVCCEntry> LinkedItemList<T> {
-    pub fn open(indexrel: &PgSearchRelation, header_blockno: pg_sys::BlockNumber) -> Self {
+    pub fn open(indexrel: &PgSearchRelation, header_blockno: pg_sys::BlockNumber, need_wal: NeedWal,) -> Self {
         Self {
             header_blockno,
-            bman: BufferManager::new(indexrel),
+            bman: BufferManager::new(indexrel, need_wal),
             _marker: std::marker::PhantomData,
         }
     }
@@ -115,8 +116,8 @@ impl<T: From<PgItem> + Into<PgItem> + Debug + Clone + MVCCEntry> LinkedItemList<
 
     /// Create a new [`LinkedItemList`] in the specified `indexrel`'s block storage.  This method
     /// will attempt to create the initial block structure using recycled blocks from the [`FreeSpaceManager`].
-    pub fn create_with_fsm(indexrel: &PgSearchRelation) -> Self {
-        let (mut _self, mut header_buffer) = Self::create_without_start_page(indexrel);
+    pub fn create_with_fsm(indexrel: &PgSearchRelation, need_wal: NeedWal) -> Self {
+        let (mut _self, mut header_buffer) = Self::create_without_start_page(indexrel, need_wal);
 
         let mut start_buffer = _self.bman.new_buffer();
         let start_blockno = start_buffer.number();
@@ -130,8 +131,8 @@ impl<T: From<PgItem> + Into<PgItem> + Debug + Clone + MVCCEntry> LinkedItemList<
         _self
     }
 
-    fn create_without_start_page(indexrel: &PgSearchRelation) -> (Self, BufferMut) {
-        let mut bman = BufferManager::new(indexrel);
+    fn create_without_start_page(indexrel: &PgSearchRelation, need_wal: NeedWal) -> (Self, BufferMut) {
+        let mut bman = BufferManager::new(indexrel, need_wal);
 
         let mut header_buffer = bman.new_buffer();
         let header_blockno = header_buffer.number();
@@ -393,7 +394,7 @@ impl<T: From<PgItem> + Into<PgItem> + Debug + Clone + MVCCEntry> LinkedItemList<
         // We create the duplicate without a start page: it will be filled in in the first
         // iteration of the loop below.
         let (mut cloned, mut previous_buffer) =
-            LinkedItemList::create_without_start_page(self.bman.buffer_access().rel());
+            LinkedItemList::create_without_start_page(self.bman.buffer_access().rel(), true);
 
         // TODO: This code could either:
         // * switch to compacting pages as it goes.

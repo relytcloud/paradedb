@@ -190,9 +190,9 @@ unsafe fn merge_info(
 
     let mut result = Vec::new();
     for index in index_kind.partitions() {
-        let metadata = MetaPage::open(&index);
+        let metadata = MetaPage::open(&index, true);
         let merge_lock = metadata.acquire_merge_lock();
-        let merge_entries = merge_lock.merge_list().list();
+        let merge_entries = merge_lock.merge_list(false).list();
         result.extend(merge_entries.into_iter().flat_map(move |merge_entry| {
             let index_name = index.name().to_owned();
             merge_entry
@@ -226,7 +226,7 @@ unsafe fn vacuum_info(
 
     let mut result = Vec::new();
     for index in index_kind.partitions() {
-        let metadata = MetaPage::open(&index);
+        let metadata = MetaPage::open(&index, true);
         let vacuum_list = metadata.vacuum_list().read_list();
         result.extend(
             vacuum_list
@@ -278,7 +278,7 @@ fn index_info(
     let mut results = Vec::new();
     for index in index_kind.partitions() {
         // open the specified index
-        let mut segment_components = MetaPage::open(&index).segment_metas();
+        let mut segment_components = MetaPage::open(&index, false).segment_metas();
         let all_entries = unsafe { segment_components.list() };
 
         for entry in all_entries {
@@ -379,7 +379,7 @@ fn storage_info(
     index: PgRelation,
 ) -> TableIterator<'static, (name!(block, i64), name!(max_offset, i32))> {
     let index = PgSearchRelation::with_lock(index.oid(), pg_sys::AccessShareLock as _);
-    let segment_components = MetaPage::open(&index).segment_metas();
+    let segment_components = MetaPage::open(&index, false).segment_metas();
     let bman = segment_components.bman();
     let (mut blockno, mut buffer) = segment_components.get_start_blockno();
     let mut data = vec![];
@@ -413,7 +413,7 @@ fn page_info(
     >,
 > {
     let index = PgSearchRelation::with_lock(index.oid(), pg_sys::AccessShareLock as _);
-    let mut segment_components = MetaPage::open(&index).segment_metas();
+    let mut segment_components = MetaPage::open(&index, true).segment_metas();
     let bman = segment_components.bman_mut();
     let buffer = bman.get_buffer(blockno as pg_sys::BlockNumber);
     let page = buffer.page();
@@ -497,9 +497,9 @@ fn merge_lock_garbage_collect(index: PgRelation) -> SetOfIterator<'static, i32> 
             // reopen the index with a RowExclusiveLock b/c we are going to be changing its physical structure
             PgSearchRelation::with_lock(oid, pg_sys::RowExclusiveLock as _)
         };
-        let metadata = MetaPage::open(&index);
+        let metadata = MetaPage::open(&index, true);
         let merge_lock = metadata.acquire_merge_lock();
-        let mut merge_list = merge_lock.merge_list();
+        let mut merge_list = merge_lock.merge_list(false);
         let before = merge_list.list();
         merge_list.garbage_collect(pg_sys::ReadNextTransactionId());
         let after = merge_list.list();

@@ -5,6 +5,38 @@ use crate::postgres::storage::metadata::MetaPage;
 use crate::postgres::storage::utils::{BM25Page, RelationBufferAccess};
 use pgrx::pg_sys;
 use std::ops::Deref;
+use crate::postgres::NeedWal;
+use std::ptr::NonNull;
+
+#[derive(Debug, Copy, Clone, Default)]
+#[repr(i32)]
+enum XlogFlag {
+    #[default]
+    ExistingBuffer = 0,
+    NewBuffer = pg_sys::GENERIC_XLOG_FULL_IMAGE as i32,
+}
+#[derive(Debug, Copy, Clone, Default)]
+enum XlogStyle {
+    #[default]
+    Unlogged,
+    Logged(NonNull<pg_sys::GenericXLogState>, XlogFlag),
+}
+unsafe impl Sync for XlogStyle {}
+unsafe impl Send for XlogStyle {}
+
+
+impl XlogStyle {
+    fn get_page(&self, buffer: pg_sys::Buffer) -> pg_sys::Page {
+        unsafe {
+            match self {
+                XlogStyle::Logged(state, flag) => {
+                    pg_sys::GenericXLogRegisterBuffer(state.as_ptr(), buffer, *flag as i32)
+                }
+                XlogStyle::Unlogged => pg_sys::BufferGetPage(buffer),
+            }
+        }
+    }
+}
 
 /// A module to help with tracking when/where blocks are acquired and released.
 ///
@@ -203,6 +235,7 @@ impl Buffer {
             .get_buffer(blockno, Some(pg_sys::BUFFER_LOCK_EXCLUSIVE));
         block_tracker::track!(Write, pg_buffer);
         BufferMut {
+            style: bman.style(XlogFlag::ExistingBuffer),
             dirty: false,
             inner: Buffer::new(pg_buffer),
         }
@@ -215,6 +248,7 @@ impl Buffer {
         let pg_buffer = bman.rbufacc.get_buffer_conditional(blockno)?;
         block_tracker::track!(Write, pg_buffer);
         Some(BufferMut {
+            style: bman.style(XlogFlag::ExistingBuffer),
             dirty: false,
             inner: Buffer::new(pg_buffer),
         })
@@ -223,6 +257,7 @@ impl Buffer {
 
 #[derive(Debug)]
 pub struct BufferMut {
+    style: XlogStyle,
     dirty: bool,
     inner: Buffer,
 }
@@ -238,9 +273,26 @@ impl Drop for BufferMut {
     fn drop(&mut self) {
         unsafe {
             if crate::postgres::utils::IsTransactionState() && self.dirty {
-                pg_sys::MarkBufferDirty(self.inner.pg_buffer);
+                match self.style {
+                    XlogStyle::Logged(state, _) => {
+                        pg_sys::GenericXLogFinish(state.as_ptr());
+                    }
+                    XlogStyle::Unlogged => {
+                        pg_sys::MarkBufferDirty(self.inner.pg_buffer);
+                    }
+                }
             }
-        }
+            else {
+                    match self.style {
+                        XlogStyle::Logged(state, _) => {
+                            pg_sys::GenericXLogAbort(state.as_ptr());
+                        }
+                        XlogStyle::Unlogged => {
+                            // noop
+                        }
+                    }
+                }
+            }
     }
 }
 
@@ -270,7 +322,8 @@ impl BufferMut {
     }
 
     pub fn page_mut(&mut self) -> PageMut {
-        let pg_page = unsafe { pg_sys::BufferGetPage(self.inner.pg_buffer) };
+        let pg_page = self.style.get_page(self.inner.pg_buffer);
+
         PageMut {
             buffer: self,
             pg_page,
@@ -603,25 +656,39 @@ impl PageHeaderMethods for pg_sys::PageHeaderData {
 pub struct BufferManager {
     rbufacc: RelationBufferAccess,
     fsm_blockno: Option<pg_sys::BlockNumber>,
+    logged: bool,
 }
 
 impl BufferManager {
-    pub fn new(rel: &PgSearchRelation) -> Self {
+    pub fn new(rel: &PgSearchRelation, need_wal: NeedWal) -> Self {
         Self {
             rbufacc: RelationBufferAccess::open(rel),
             fsm_blockno: None,
+            logged: need_wal,
         }
     }
 
     pub fn fsm(&mut self) -> FreeSpaceManager {
         let fsm_blockno = *self
             .fsm_blockno
-            .get_or_insert_with(|| MetaPage::open(self.rbufacc.rel()).fsm());
+            .get_or_insert_with(|| MetaPage::open(self.rbufacc.rel(), false).fsm());
         FreeSpaceManager::open(fsm_blockno)
     }
 
     pub fn buffer_access(&self) -> &RelationBufferAccess {
         &self.rbufacc
+    }
+
+    fn style(&self, flag: XlogFlag) -> XlogStyle {
+        if self.logged {
+            unsafe { XlogStyle::Logged(NonNull::new_unchecked(self.rbufacc.start_xlog()), flag) }
+        } else {
+            XlogStyle::Unlogged
+        }
+    }
+
+    pub fn is_logged(&self) -> bool {
+        self.logged
     }
 
     #[must_use]
@@ -641,6 +708,7 @@ impl BufferManager {
 
         block_tracker::track!(Write, pg_buffer);
         BufferMut {
+            style: self.style(XlogFlag::NewBuffer), 
             dirty: false,
             inner: Buffer { pg_buffer },
         }
@@ -657,6 +725,7 @@ impl BufferManager {
         }
 
         let buffer_access = self.buffer_access().clone();
+        let is_logged = self.logged;
 
         let mut fsm_blocknos = self.fsm().drain(self, npages).map(move |blockno| {
             let pg_buffer = buffer_access.get_buffer_extended(
@@ -666,10 +735,18 @@ impl BufferManager {
                 None,
             );
             block_tracker::track!(Write, pg_buffer);
+            let style = if is_logged {
+                unsafe {
+                    XlogStyle::Logged(NonNull::new_unchecked(buffer_access.start_xlog()), XlogFlag::NewBuffer)
+                }
+            } else {
+                XlogStyle::Unlogged
+            };
             BufferMut {
+                style: style,
                 dirty: false,
                 inner: Buffer { pg_buffer },
-            }
+                }
         });
 
         let bman = self.clone();
@@ -689,10 +766,22 @@ impl BufferManager {
             if new_buffers.is_none() {
                 // the fsm didn't give us all the buffers we asked for, so we need to get the rest
                 // by extending the relation with brand new buffers
-                new_buffers = Some(bman.buffer_access().new_buffers(remaining_from_fsm).map(
+                let rbufacc_clone = bman.buffer_access().clone();
+                new_buffers = Some(rbufacc_clone.new_buffers(remaining_from_fsm).map(
                     move |pg_buffer| {
                         block_tracker::track!(Write, pg_buffer);
+                        let style = if is_logged {
+                            unsafe {
+                                XlogStyle::Logged(
+                                    NonNull::new_unchecked(rbufacc_clone.start_xlog()), 
+                                    XlogFlag::NewBuffer
+                                )
+                            }
+                        } else {
+                            XlogStyle::Unlogged
+                        };
                         BufferMut {
+                            style: style,
                             dirty: false,
                             inner: Buffer { pg_buffer },
                         }
@@ -735,6 +824,7 @@ impl BufferManager {
     pub fn get_buffer_mut(&mut self, blockno: pg_sys::BlockNumber) -> BufferMut {
         block_tracker::track!(Write, pg_buffer);
         BufferMut {
+            style: self.style(XlogFlag::ExistingBuffer),
             dirty: false,
             inner: Buffer::new(
                 self.rbufacc
@@ -763,6 +853,7 @@ impl BufferManager {
             if pg_sys::ConditionalLockBuffer(pg_buffer) {
                 block_tracker::track!(Conditional, pg_buffer);
                 Some(BufferMut {
+                    style: self.style(XlogFlag::ExistingBuffer),
                     dirty: false,
                     inner: Buffer::new(pg_buffer),
                 })
@@ -779,6 +870,7 @@ impl BufferManager {
             block_tracker::track!(Cleanup, pg_buffer);
             pg_sys::LockBufferForCleanup(pg_buffer);
             BufferMut {
+                style: self.style(XlogFlag::ExistingBuffer),
                 dirty: false,
                 inner: Buffer::new(pg_buffer),
             }
@@ -794,6 +886,7 @@ impl BufferManager {
             if pg_sys::ConditionalLockBufferForCleanup(pg_buffer) {
                 block_tracker::track!(ConditionalCleanup, pg_buffer);
                 Some(BufferMut {
+                    style: self.style(XlogFlag::ExistingBuffer),
                     dirty: false,
                     inner: Buffer::new(pg_buffer),
                 })
@@ -815,7 +908,12 @@ pub fn init_new_buffer(rel: &PgSearchRelation) -> BufferMut {
     let rbacc = RelationBufferAccess::open(rel);
     let pg_buffer = rbacc.new_buffer();
 
+    let style = 
+    unsafe {
+        XlogStyle::Logged(NonNull::new_unchecked(rbacc.start_xlog()), XlogFlag::NewBuffer)
+    };
     let mut buffer = BufferMut {
+        style: style,
         dirty: false,
         inner: Buffer { pg_buffer },
     };

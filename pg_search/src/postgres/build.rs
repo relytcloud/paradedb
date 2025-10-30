@@ -30,6 +30,23 @@ use pgrx::*;
 use tantivy::schema::Schema;
 use tantivy::{Index, IndexSettings};
 use tokenizers::SearchTokenizer;
+use pgrx::pg_sys::WalLevel::WAL_LEVEL_REPLICA;
+
+
+fn relation_needs_wal(relation: &PgSearchRelation) -> bool {
+    unsafe fn xlog_is_needed() -> bool {
+        pg_sys::wal_level >= WAL_LEVEL_REPLICA as i32
+    }
+
+    unsafe fn relation_is_permanent(relation: &PgSearchRelation) -> bool {
+        relation.relpersistence() == pg_sys::RELPERSISTENCE_PERMANENT as core::ffi::c_char
+    }
+
+    unsafe {
+        relation_is_permanent(relation)
+            && (xlog_is_needed())
+    }
+}
 
 #[pg_guard]
 pub extern "C-unwind" fn ambuild(
@@ -41,6 +58,12 @@ pub extern "C-unwind" fn ambuild(
     let index_relation = unsafe { PgSearchRelation::from_pg(indexrel) };
 
     unsafe {
+
+        // Here, in order to support the NeonDatabase, we need to call the smgr_start_unlogged_build function.
+        #[cfg(feature = "neon")]{
+            pg_sys::smgr_start_unlogged_build(pg_sys::RelationGetSmgr(indexrel));
+        }
+        
         build_empty(&index_relation);
     }
 
@@ -72,6 +95,30 @@ pub extern "C-unwind" fn ambuild(
             (*index_info).ii_Concurrent,
         )
         .unwrap_or_else(|e| panic!("{e}"));
+
+        // See the comment above.
+        #[cfg(feature = "neon")]
+        unsafe { 
+            pg_sys::smgr_finish_unlogged_build_phase_1(pg_sys::RelationGetSmgr(indexrel)); 
+        }
+
+        unsafe {
+            if relation_needs_wal(&index_relation) {
+                let nblocks =
+                    pg_sys::RelationGetNumberOfBlocksInFork(indexrel, pg_sys::ForkNumber::MAIN_FORKNUM);
+    
+    
+                pg_sys::log_newpage_range(indexrel, pg_sys::ForkNumber::MAIN_FORKNUM, 0, nblocks, true);
+    
+            }
+        }
+    
+        // See the comment above.
+        #[cfg(feature = "neon")]
+        unsafe { 
+            pg_sys::smgr_end_unlogged_build(pg_sys::RelationGetSmgr(indexrel));
+        }
+
 
         pgrx::debug1!("build_index: flushing buffers");
         pg_sys::FlushRelationBuffers(indexrel);
@@ -292,7 +339,7 @@ fn create_index(index_relation: &PgSearchRelation) -> Result<()> {
     );
 
     let schema = builder.build();
-    let directory = MvccSatisfies::Snapshot.directory(index_relation);
+    let directory = MvccSatisfies::Snapshot.directory(index_relation, true);
     let settings = IndexSettings {
         docstore_compress_dedicated_thread: false,
         ..IndexSettings::default()

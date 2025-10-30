@@ -2,6 +2,7 @@ use crate::postgres::rel::PgSearchRelation;
 use crate::postgres::storage::block::FileEntry;
 use crate::postgres::storage::linked_bytes::RangeData;
 use crate::postgres::storage::LinkedBytesList;
+use crate::postgres::NeedWal;
 use anyhow::Result;
 use std::io::Error;
 use std::ops::Range;
@@ -16,8 +17,8 @@ pub struct SegmentComponentReader {
 }
 
 impl SegmentComponentReader {
-    pub unsafe fn new(indexrel: &PgSearchRelation, entry: FileEntry) -> Self {
-        let block_list = LinkedBytesList::open(indexrel, entry.starting_block);
+    pub unsafe fn new(indexrel: &PgSearchRelation, entry: FileEntry, need_wal: NeedWal) -> Self {
+        let block_list = LinkedBytesList::open(indexrel, entry.starting_block, need_wal);
 
         Self { block_list, entry }
     }
@@ -74,7 +75,7 @@ mod tests {
         let segment = format!("{}.term", uuid::Uuid::new_v4());
         let path = Path::new(segment.as_str());
 
-        let mut writer = unsafe { SegmentComponentWriter::new(&indexrel, path) };
+        let mut writer = unsafe { SegmentComponentWriter::new(&indexrel, path, false)};
         writer.write_all(&bytes).unwrap();
         let file_entry = writer.file_entry();
         writer.terminate().unwrap();

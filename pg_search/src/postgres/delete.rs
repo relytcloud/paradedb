@@ -48,7 +48,7 @@ pub unsafe extern "C-unwind" fn ambulkdelete(
 
     // first, we need an exclusive lock on the CLEANUP_LOCK.  Once we get it, we know that there
     // are no concurrent merges happening
-    let mut metadata = MetaPage::open(&index_relation);
+    let mut metadata = MetaPage::open(&index_relation, true);
     let cleanup_lock = metadata.cleanup_lock_exclusive();
 
     // take the MergeLock
@@ -57,12 +57,12 @@ pub unsafe extern "C-unwind" fn ambulkdelete(
     // garbage collecting the MergeList is necessary to remove any stale entries that may have
     // been leftover from a cancelled merge or crash during merge
     merge_lock
-        .merge_list()
+        .merge_list(true)
         .garbage_collect(pg_sys::ReadNextTransactionId());
 
     // and now we should not have any merges happening, and cannot
     assert!(
-        merge_lock.merge_list().is_empty(),
+        merge_lock.merge_list(false).is_empty(),
         "ambulkdelete cannot run concurrently with an active merge operation"
     );
     drop(cleanup_lock);
@@ -82,7 +82,7 @@ pub unsafe extern "C-unwind" fn ambulkdelete(
     let mut old_metas = Vec::new();
     let mut new_metas = Vec::new();
 
-    let directory = MvccSatisfies::Vacuum.directory(&index_relation);
+    let directory = MvccSatisfies::Vacuum.directory(&index_relation, true);
     let index = Index::open(directory).unwrap();
     let searchable_segment_metas = index.searchable_segment_metas().unwrap();
 

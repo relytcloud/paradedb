@@ -391,7 +391,7 @@ impl CustomScan for PdbScan {
             // states. Should consider having a separate builder for PrivateData.
             let mut custom_private = PrivateData::default();
 
-            let directory = MvccSatisfies::LargestSegment.directory(&bm25_index);
+            let directory = MvccSatisfies::LargestSegment.directory(&bm25_index, false);
             let segment_count = directory.total_segment_count(); // return value only valid after the index has been opened
             let index = Index::open(directory).expect("custom_scan: should be able to open index");
             let segment_count = segment_count.load(Ordering::Relaxed);
@@ -636,7 +636,7 @@ impl CustomScan for PdbScan {
             // Extract the indexrelid early to avoid borrow checker issues later
             let indexrelid = private_data.indexrelid().expect("indexrelid should be set");
             let indexrel = PgSearchRelation::with_lock(indexrelid, pg_sys::AccessShareLock as _);
-            let directory = MvccSatisfies::Snapshot.directory(&indexrel);
+            let directory = MvccSatisfies::Snapshot.directory(&indexrel, false);
             let index = Index::open(directory)
                 .expect("should be able to open index for snippet extraction");
 
@@ -664,7 +664,7 @@ impl CustomScan for PdbScan {
 
             builder
                 .custom_private_mut()
-                .set_ambulkdelete_epoch(MetaPage::open(&indexrel).ambulkdelete_epoch());
+                .set_ambulkdelete_epoch(MetaPage::open(&indexrel, false).ambulkdelete_epoch());
 
             builder.build()
         }

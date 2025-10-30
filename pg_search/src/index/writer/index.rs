@@ -140,7 +140,7 @@ impl SerialIndexWriter {
             );
         }
 
-        let directory = mvcc_satisfies.directory(index_relation);
+        let directory = mvcc_satisfies.directory(index_relation, true);
         let mut index = Index::open(directory)?;
         let schema = index_relation.schema()?;
         setup_tokenizers(index_relation, &mut index)?;

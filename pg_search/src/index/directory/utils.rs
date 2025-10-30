@@ -5,6 +5,7 @@ use crate::postgres::storage::block::{
     DeleteEntry, FileEntry, LinkedList, MVCCEntry, PgItem, SegmentFileDetails, SegmentMetaEntry,
 };
 use crate::postgres::storage::metadata::MetaPage;
+use crate::postgres::NeedWal;
 use anyhow::Result;
 use pgrx::pg_sys;
 use std::path::PathBuf;
@@ -17,8 +18,8 @@ use tantivy::{
     IndexMeta,
 };
 
-pub fn save_schema(indexrel: &PgSearchRelation, tantivy_schema: &Schema) -> Result<()> {
-    let schema = MetaPage::open(indexrel).schema_bytes();
+pub fn save_schema(indexrel: &PgSearchRelation, tantivy_schema: &Schema, need_wal: NeedWal) -> Result<()> {
+    let schema = MetaPage::open(indexrel, need_wal).schema_bytes();
     if schema.is_empty() {
         let bytes = serde_json::to_vec(tantivy_schema)?;
         unsafe {
@@ -28,8 +29,8 @@ pub fn save_schema(indexrel: &PgSearchRelation, tantivy_schema: &Schema) -> Resu
     Ok(())
 }
 
-pub fn save_settings(indexrel: &PgSearchRelation, tantivy_settings: &IndexSettings) -> Result<()> {
-    let settings = MetaPage::open(indexrel).settings_bytes();
+pub fn save_settings(indexrel: &PgSearchRelation, tantivy_settings: &IndexSettings, need_wal: NeedWal) -> Result<()> {
+    let settings = MetaPage::open(indexrel, need_wal).settings_bytes();
     if settings.is_empty() {
         let bytes = serde_json::to_vec(tantivy_settings)?;
         unsafe {
@@ -44,10 +45,11 @@ pub unsafe fn save_new_metas(
     new_meta: &IndexMeta,
     prev_meta: &IndexMeta,
     directory_entries: &mut HashMap<PathBuf, FileEntry>,
+    need_wal: NeedWal,
 ) -> Result<()> {
     // in order to ensure that all of our mutations to the list of segments appear atomically on
     // physical replicas, we atomically operate on a deep copy of the list.
-    let mut segment_metas_linked_list = MetaPage::open(indexrel).segment_metas();
+    let mut segment_metas_linked_list = MetaPage::open(indexrel, need_wal).segment_metas();
     let mut linked_list = segment_metas_linked_list.atomically();
 
     let incoming_segments = new_meta
@@ -341,7 +343,7 @@ pub unsafe fn load_metas(
     let mut pin_cushion = PinCushion::default();
 
     // Collect segments from each relevant list.
-    let metapage = MetaPage::open(indexrel);
+    let metapage = MetaPage::open(indexrel, false);
     let mut segment_metas = metapage.segment_metas();
     let mut exhausted_metas_lists = false;
 
@@ -412,7 +414,7 @@ pub unsafe fn load_metas(
             {
                 // If we haven't tried the `segment_metas_garbage` list, try that next.
                 if !exhausted_metas_lists {
-                    if let Some(garbage) = MetaPage::open(indexrel).segment_metas_garbage() {
+                    if let Some(garbage) = MetaPage::open(indexrel, false).segment_metas_garbage() {
                         segment_metas = garbage;
                         exhausted_metas_lists = true;
                         continue;
@@ -476,7 +478,7 @@ pub unsafe fn load_metas(
 }
 
 pub fn load_index_schema(indexrel: &PgSearchRelation) -> tantivy::Result<Option<Schema>> {
-    let metapage = MetaPage::open(indexrel);
+    let metapage = MetaPage::open(indexrel, false);
     let schema_bytes = unsafe { metapage.schema_bytes().read_all() };
     if schema_bytes.is_empty() {
         return Ok(None);

@@ -19,6 +19,7 @@ use super::block::{bm25_max_free_space, BM25PageSpecialData, LinkedList, LinkedL
 use crate::postgres::rel::PgSearchRelation;
 use crate::postgres::storage::blocklist;
 use crate::postgres::storage::buffer::{init_new_buffer, BufferManager, PageHeaderMethods};
+use crate::postgres::NeedWal;
 use anyhow::Result;
 use pgrx::{check_for_interrupts, pg_sys};
 use std::cmp::min;
@@ -232,9 +233,9 @@ impl Deref for RangeData {
 }
 
 impl LinkedBytesList {
-    pub fn open(rel: &PgSearchRelation, header_blockno: pg_sys::BlockNumber) -> Self {
+    pub fn open(rel: &PgSearchRelation, header_blockno: pg_sys::BlockNumber, need_wal: NeedWal,) -> Self {
         Self {
-            bman: BufferManager::new(rel),
+            bman: BufferManager::new(rel, need_wal),
             header_blockno,
             blocklist_reader: Default::default(),
         }
@@ -262,8 +263,8 @@ impl LinkedBytesList {
 
     /// Create a new [`LinkedBytesList`] in the specified `indexrel`'s block storage.  This method
     /// will attempt to create the initial block structure using recycled blocks from the [`FreeSpaceManager`].
-    pub fn create_with_fsm(rel: &PgSearchRelation) -> Self {
-        let mut bman = BufferManager::new(rel);
+    pub fn create_with_fsm(rel: &PgSearchRelation, need_wal: NeedWal) -> Self {
+        let mut bman = BufferManager::new(rel, need_wal);
         let mut buffers = bman.new_buffers(2);
 
         let mut header_buffer = buffers.next().unwrap();

@@ -109,7 +109,7 @@ impl CustomScan for AggregateScan {
             )?
         };
         let (table, bm25_index) = rel_get_bm25_index(unsafe { (*heap_rte).relid })?;
-        let directory = MvccSatisfies::LargestSegment.directory(&bm25_index);
+        let directory = MvccSatisfies::LargestSegment.directory(&bm25_index, false);
         let index =
             Index::open(directory).expect("aggregate_custom_scan: should be able to open index");
         let schema = bm25_index

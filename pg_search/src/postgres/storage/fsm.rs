@@ -455,8 +455,8 @@ unsafe fn fsm_info(
 > {
     let index = PgSearchRelation::from_pg(index.as_ptr());
 
-    let meta = MetaPage::open(&index);
-    let bman = BufferManager::new(&index);
+    let meta = MetaPage::open(&index, false);
+    let bman = BufferManager::new(&index, false);
     let mut mapping = Vec::<(pg_sys::BlockNumber, Vec<Option<FSMEntry>>)>::default();
 
     let fsm_start = meta.fsm();

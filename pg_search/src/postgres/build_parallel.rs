@@ -444,7 +444,7 @@ impl WorkerBuildState {
             segment_ids_to_merge.len(),
             segment_ids_to_merge
         );
-        let directory = MvccSatisfies::Mergeable.directory(&self.indexrel);
+        let directory = MvccSatisfies::Mergeable.directory(&self.indexrel, true);
         let mut merger = SearchIndexMerger::open(directory)?;
         unsafe { set_ps_display_suffix(MERGING.as_ptr()) };
         merger.merge_segments(&segment_ids_to_merge)?;
@@ -770,7 +770,7 @@ mod plan {
                 return 0.0;
             }
 
-            let bman = BufferManager::new(heap_relation);
+            let bman = BufferManager::new(heap_relation, false);
             let buffer = bman.get_buffer(0);
             let page = buffer.page();
             let max_offset = page.max_offset_number();

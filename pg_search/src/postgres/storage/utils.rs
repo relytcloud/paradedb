@@ -213,6 +213,10 @@ impl RelationBufferAccess {
             buffer
         }
     }
+
+    pub unsafe fn start_xlog(&self) -> *mut pg_sys::GenericXLogState {
+        pg_sys::GenericXLogStart(self.rel.as_ptr())
+    }
 }
 
 /// Extend the relation by one buffer.

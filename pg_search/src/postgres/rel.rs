@@ -225,6 +225,10 @@ impl PgSearchRelation {
         }
     }
 
+    pub fn relpersistence(&self) -> i8 {
+        unsafe { (*self.rd_rel).relpersistence }
+    }
+
     pub fn as_ptr(&self) -> pg_sys::Relation {
         // SAFETY: self.0 is always Some
         unsafe { self.0.as_ref().unwrap_unchecked().0.as_ptr() }

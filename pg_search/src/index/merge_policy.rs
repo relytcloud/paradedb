@@ -192,7 +192,7 @@ impl LayeredMergePolicy {
         merger: &SearchIndexMerger,
     ) {
         let mut non_mergeable_segments = metadata.vacuum_list().read_list();
-        non_mergeable_segments.extend(unsafe { merge_lock.merge_list().list_segment_ids() });
+        non_mergeable_segments.extend(unsafe { merge_lock.merge_list(false).list_segment_ids() });
 
         if unsafe { pg_sys::message_level_is_interesting(pg_sys::DEBUG1 as _) } {
             pgrx::debug1!("do_merge: non_mergeable_segments={non_mergeable_segments:?}");

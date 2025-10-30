@@ -59,6 +59,8 @@ pub mod types_arrow;
 pub mod utils;
 pub mod var;
 
+pub type NeedWal = bool;
+
 #[repr(u16)] // b/c that's what [`pg_sys::StrategyNumber`] is
 pub enum ScanStrategy {
     TextQuery = 1,

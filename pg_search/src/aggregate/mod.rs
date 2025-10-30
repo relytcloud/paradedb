@@ -330,7 +330,7 @@ pub fn execute_aggregate(
             None,
         )?;
         let agg_req = serde_json::from_value(agg)?;
-        let ambulkdelete_epoch = MetaPage::open(index).ambulkdelete_epoch();
+        let ambulkdelete_epoch = MetaPage::open(index, false).ambulkdelete_epoch();
         let segment_ids = reader
             .segment_readers()
             .iter()

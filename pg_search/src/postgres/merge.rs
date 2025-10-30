@@ -104,7 +104,7 @@ impl From<&PgSearchRelation> for IndexLayerSizes {
 
         let mut index_byte_size = 0;
         unsafe {
-            MetaPage::open(index).segment_metas().for_each(|_, entry| {
+            MetaPage::open(index, false).segment_metas().for_each(|_, entry| {
                 if entry.visible() {
                     index_byte_size += entry.byte_size()
                 }
@@ -196,15 +196,15 @@ pub unsafe fn do_merge(
 ) -> anyhow::Result<()> {
     let layer_sizes = IndexLayerSizes::from(index);
 
-    let metadata = MetaPage::open(index);
+    let metadata = MetaPage::open(index, true);
     let cleanup_lock = metadata.cleanup_lock_shared();
     let merge_lock = metadata.acquire_merge_lock();
 
     let needs_background_merge = layer_sizes.user_configured_background_layers()
-        && { merge_lock.merge_list().is_empty() }
+        && { merge_lock.merge_list(false).is_empty() }
         && {
             let combined_layers = layer_sizes.combined();
-            let merger = SearchIndexMerger::open(MvccSatisfies::Mergeable.directory(index))?;
+            let merger = SearchIndexMerger::open(MvccSatisfies::Mergeable.directory(index, true))?;
             let mut background_merge_policy = LayeredMergePolicy::new(combined_layers);
 
             background_merge_policy.set_mergeable_segment_entries(&metadata, &merge_lock, &merger);
@@ -295,7 +295,7 @@ unsafe extern "C-unwind" fn background_merge(arg: pg_sys::Datum) {
             return;
         }
         let index = index.unwrap();
-        let metadata = MetaPage::open(&index);
+        let metadata = MetaPage::open(&index, false);
         let layer_sizes = IndexLayerSizes::from(&index);
         let merge_policy = LayeredMergePolicy::new(layer_sizes.combined());
 
@@ -327,8 +327,8 @@ unsafe fn merge_index(
     // locked here so we can cause `ambulkdelete()` to block, waiting for all merging to finish
     // before it decides to find the segments it should vacuum.  The reason is that it needs to see
     // the final merged segment, not the original segments that will be deleted
-    let metadata = MetaPage::open(indexrel);
-    let merger = SearchIndexMerger::open(MvccSatisfies::Mergeable.directory(indexrel))
+    let metadata = MetaPage::open(indexrel, true);
+    let merger = SearchIndexMerger::open(MvccSatisfies::Mergeable.directory(indexrel, true))
         .expect("should be able to open merger");
 
     // further reduce the set of segments that the LayeredMergePolicy will operate on by internally
@@ -347,7 +347,7 @@ unsafe fn merge_index(
         // record all the segments the SearchIndexMerger can see, as those are the ones that
         // could be merged
         let merge_entry = merge_lock
-            .merge_list()
+            .merge_list(true)
             .add_segment_ids(merge_policy.mergeable_segments(), current_xid)
             .expect("should be able to write current merge segment_id list");
         drop(merge_lock);
@@ -375,7 +375,7 @@ unsafe fn merge_index(
         // re-acquire the MergeLock to remove the entry we made above
         let merge_lock = metadata.acquire_merge_lock();
         merge_lock
-            .merge_list()
+            .merge_list(true)
             .remove_entry(merge_entry)
             .expect("should be able to remove MergeEntry");
         drop(merge_lock);
@@ -421,7 +421,7 @@ pub unsafe fn garbage_collect_index(
     // SEGMENT_METAS must be updated atomically so that a consistent list is visible for consumers:
     // SEGMENT_METAS_GARBAGE need not be because it is only ever consumed on the physical
     // replication primary.
-    let mut segment_metas_linked_list = MetaPage::open(indexrel).segment_metas();
+    let mut segment_metas_linked_list = MetaPage::open(indexrel, true).segment_metas();
     let mut segment_metas = segment_metas_linked_list.atomically();
     let entries = segment_metas.garbage_collect(next_xid);
 
@@ -436,7 +436,7 @@ pub fn free_entries(
     freeable_entries: Vec<SegmentMetaEntry>,
     current_xid: pg_sys::TransactionId,
 ) {
-    let mut bman = BufferManager::new(indexrel);
+    let mut bman = BufferManager::new(indexrel, true);
     bman.fsm().extend_with_when_recyclable(
         &mut bman,
         current_xid,
@@ -445,11 +445,11 @@ pub fn free_entries(
             let iter: Box<dyn Iterator<Item = pg_sys::BlockNumber>> = if entry.is_orphaned_delete()
             {
                 let block = entry.delete.as_ref().unwrap().file_entry.starting_block;
-                Box::new(LinkedBytesList::open(indexrel, block).freeable_blocks())
+                Box::new(LinkedBytesList::open(indexrel, block, true).freeable_blocks())
             // otherwise, we need to free the blocks for all the files in the `SegmentMetaEntry`
             } else {
                 Box::new(entry.file_entries().flat_map(move |(file_entry, _)| {
-                    LinkedBytesList::open(indexrel, file_entry.starting_block).freeable_blocks()
+                    LinkedBytesList::open(indexrel, file_entry.starting_block, true).freeable_blocks()
                 }))
             };
             iter

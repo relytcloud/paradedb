@@ -22,6 +22,7 @@ use crate::postgres::storage::block::{
 };
 use crate::postgres::storage::buffer::{BufferManager, BufferMut, PinnedBuffer};
 use crate::postgres::storage::{LinkedBytesList, LinkedItemList};
+use crate::postgres::NeedWal;
 use pgrx::{pg_sys, StringInfo};
 use serde::{Deserialize, Serialize};
 use std::slice::from_raw_parts;
@@ -47,15 +48,15 @@ pub struct MergeLock {
 
 impl MergeLock {
     /// This is a blocking operation to acquire an exclusive lock on the merge lock buffer
-    pub unsafe fn acquire(indexrel: &PgSearchRelation, block_number: pg_sys::BlockNumber) -> Self {
-        let mut bman = BufferManager::new(indexrel);
+    pub unsafe fn acquire(indexrel: &PgSearchRelation, block_number: pg_sys::BlockNumber, need_wal: NeedWal) -> Self {
+        let mut bman = BufferManager::new(indexrel, need_wal);
         let mut buffer = bman.get_buffer_mut(block_number);
         let mut page = buffer.page_mut();
         let metadata = page.contents_mut::<MergeLockData>();
 
         if !block_number_is_valid(metadata.merge_list) {
             metadata.merge_list =
-                LinkedItemList::<MergeEntry>::create_with_fsm(indexrel).get_header_blockno();
+                LinkedItemList::<MergeEntry>::create_with_fsm(indexrel, need_wal).get_header_blockno();
         }
 
         MergeLock {
@@ -65,13 +66,15 @@ impl MergeLock {
         }
     }
 
-    pub fn merge_list(&self) -> MergeList {
+    pub fn merge_list(&self, need_wal: NeedWal) -> MergeList {
         MergeList::open(
             LinkedItemList::<MergeEntry>::open(
                 self.bman.buffer_access().rel(),
                 self.data.merge_list,
+                need_wal,
             ),
             self.bman.buffer_access().rel(),
+            need_wal,
         )
     }
 }
@@ -122,7 +125,7 @@ impl VacuumList {
         let mut segment_ids = segment_ids.collect::<Vec<_>>();
         segment_ids.sort();
 
-        let mut bman = BufferManager::new(&self.indexrel);
+        let mut bman = BufferManager::new(&self.indexrel, true);
         let mut buffer = bman.get_buffer_mut(self.start_block_number);
         let mut page = buffer.page_mut();
         let mut contents = page.contents_mut::<VacuumListData>();
@@ -165,7 +168,7 @@ impl VacuumList {
 
         let mut segment_ids = HashSet::default();
 
-        let bman = BufferManager::new(&self.indexrel);
+        let bman = BufferManager::new(&self.indexrel, false);
         let mut buffer = bman.get_buffer(self.start_block_number);
         loop {
             let page = buffer.page();
@@ -196,7 +199,7 @@ impl VacuumList {
     pub fn is_ambulkdelete_running(&self) -> bool {
         // an `ambulkdelete()` is running if we can't acquire the sentinel block for cleanup
         // it means ambulkdelete() is holding a pin on that buffer
-        let mut bman = BufferManager::new(&self.indexrel);
+        let mut bman = BufferManager::new(&self.indexrel, false);
         bman.get_buffer_for_cleanup_conditional(self.ambulkdelete_sentinel)
             .is_none()
     }
@@ -261,7 +264,7 @@ impl MVCCEntry for MergeEntry {
 
 impl MergeEntry {
     pub unsafe fn segment_ids(&self, indexrel: &PgSearchRelation) -> Vec<SegmentId> {
-        let bytes = LinkedBytesList::open(indexrel, self.segment_ids_start_blockno);
+        let bytes = LinkedBytesList::open(indexrel, self.segment_ids_start_blockno, false);
         let bytes = bytes.read_all();
         bytes
             .chunks(size_of::<SegmentIdBytes>())
@@ -278,8 +281,8 @@ pub struct MergeList {
 }
 
 impl MergeList {
-    pub fn open(entries: LinkedItemList<MergeEntry>, indexrel: &PgSearchRelation) -> Self {
-        let bman = BufferManager::new(indexrel);
+    pub fn open(entries: LinkedItemList<MergeEntry>, indexrel: &PgSearchRelation, need_wal: NeedWal) -> Self {
+        let bman = BufferManager::new(indexrel, need_wal);
         Self { entries, bman }
     }
 
@@ -295,10 +298,11 @@ impl MergeList {
         let recycled_entries = self.entries.garbage_collect(when_recyclable);
 
         let indexrel = self.bman.buffer_access().rel().clone();
+        let need_wal = self.bman.is_logged();
         self.bman.fsm().extend(
             &mut self.bman,
             recycled_entries.into_iter().flat_map(move |entry| {
-                LinkedBytesList::open(&indexrel, entry.segment_ids_start_blockno).freeable_blocks()
+                LinkedBytesList::open(&indexrel, entry.segment_ids_start_blockno, need_wal).freeable_blocks()
             }),
         );
     }
@@ -315,7 +319,7 @@ impl MergeList {
             .into_iter()
             .flat_map(|segment_id| segment_id.uuid_bytes().iter().copied())
             .collect::<Vec<_>>();
-        let segment_ids_list = LinkedBytesList::create_with_fsm(self.bman.buffer_access().rel());
+        let segment_ids_list = LinkedBytesList::create_with_fsm(self.bman.buffer_access().rel(), self.bman.is_logged());
         let segment_ids_start_blockno = segment_ids_list.get_header_blockno();
         segment_ids_list.writer().write(&segment_id_bytes)?;
 
@@ -350,6 +354,7 @@ impl MergeList {
         LinkedBytesList::open(
             self.bman.buffer_access().rel(),
             removed_entry.segment_ids_start_blockno,
+            false,
         )
         .return_to_fsm();
         Ok(removed_entry)
